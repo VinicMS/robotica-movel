@@ -78,54 +78,132 @@ def main():
     #Variáveis 
     t = 0       # Guarda tempo de simulação no Python
     dt = 0.05   # Intervalo de integração
-    xo = 0      # Posição da Odometria [xo,yo,phio]
-    yo = 0      # Posição da Odometria [xo,yo,phio]
-    phio = 0    # Posição da Odometria [xo,yo,phio]
     N = 20      # Resolução do Encoder
     pd_ant = 0  # Auxiliar - Cáluculo da variação de pulsos
     pe_ant = 0  # Auxiliar - Cáluculo da variação de pulsos
-    Qe = 0      # Velocidade [pulsos/seg]
-    Qd = 0      # Velocidade [pulsos/seg]
-    k = 0       #auxiliar
     pe = 0
     pd = 0
     dpe = 0
     dpd = 0
+    Kp_g = 1
+    u_max = 12
+
+    erro_E = 0
+    erro_old_E = 0
+    erro_i_E = 0
+    erro_d_E = 0
+    erro_D = 0
+    erro_old_D = 0
+    erro_i_D = 0
+    erro_d_D = 0
+
+    Kp_E = 0.15
+    Ki_E = 0
+    Kd_E = 0
+
+    Kp_D = 0.15
+    Ki_D = 0
+    Kd_D = 0
+
+    u0 = 0.5
+
+    phi_o = 0
+    x_o = 0
+    y_o = 0
     
     #Loop de controle do robô
     while vrep.simxGetConnectionId(clientID) != -1:
         t0 = time.perf_counter()
         
-        t += dt 
-        
-        #Obtém pulsos do encoder (pl- pulsos da esquerda) (pr - pulsos da direita)
-        pe, pd = getEncoderPulses() 
-        
-        dpe = pe - pe_ant
-        dpd = pd - pd_ant
-    
-        pe_ant, pd_ant = pe, pd
-        
-        #Calcula posição por odometria
-        xo = 0
-        yo = 0
-        phio = 0
+        t += dt
         
         #Controle de posição   
-        xg, yg, phig = Obter_Posicao(TargetbodyHandle)   
-         
-        u = 0.1
-        w = 0.0
-        
-        ControleUniciclo(u,w) #Movimento de exemplo
-        
-        # Teste da odometria contra dados do simulador)
+        xg,     yg,     phig = Obter_Posicao(TargetbodyHandle)   
         x_real, y_real, phi_real = Obter_Posicao(bodyHandle)
+
+        #orientação phi (heading) até o ponto desejado
+        phid_o = np.arctan2(yg-y_o,xg-x_o)
+        #toma o erro com relacao a orientacao atual
+        e_o = phid_o - phi_o
+        #normaliza em 360 (ou 2pi)
+        e_o = np.arctan2(np.sin(e_o), np.cos(e_o))
+        #rho calcula a distancia ate o ponto desejado
+        rho_o = np.sqrt((xg-x_o)**2 + (yg-y_o)**2)
+
+        #testar se rho<l, se sim, zera tudo e para de mover.
+        if rho_o < 0.1 :
+            chave = False #chave falsa, zera tudo (u e w).
+            #count+=1
+        else:
+            chave=True
+
+        if chave == True:
+            u = u0
+            w = Kp_g * e_o
+        else:
+            u = 0.0
+            w = 0.0
+
+        #Obtém pulsos do encoder (pl- pulsos da esquerda) (pr - pulsos da direita)
+        pe, pd = getEncoderPulses()
         
-        #print("Pose Real        (x,y,phi): (%1.2f, %1.2f, %1.2f)" % (x_real, y_real, phi_real))
-        #print("Pose Odometria   (x,y,phi): (%1.2f, %1.2f, %1.2f)" % (xo, yo, phio))
+        dpe = (pe - pe_ant)/dt
+        dpd = (pd - pd_ant)/dt
+
+        we_pulso = (dpe*2*np.pi)/N
+        wd_pulso = (dpd*2*np.pi)/N
+        pe_ant, pd_ant = pe, pd
+
+        we_o = ((2*u - w*L)/(2*R))
+        wd_o = ((2*u + w*L)/(2*R))
+
+        #ODOMETRIA COM INTEGRAÇÃO NUMÉRICA
+        phi_p_o = (R/L)*(wd_pulso - we_pulso)
+        x_p_o = (R/2)*(wd_pulso + we_pulso)*np.cos(phi_o)
+        y_p_o = (R/2)*(wd_pulso + we_pulso)*np.sin(phi_o)
+        
+        phi_o = phi_o + phi_p_o*dt
+        x_o = x_o + x_p_o*dt
+        y_o = y_o + y_p_o*dt
+
+        u_E = 0
+        u_D = 0
+
+
+        #ESQUERDA
+
+        erro_E = we_o - we_pulso
+        erro_d_E = (erro_E - erro_old_E)/dt
+        erro_i_E = erro_i_E + erro_E*dt
+        erro_old_E = erro_E
+
+        u_E = Kp_E*erro_E + Ki_E*erro_i_E + Kd_E*erro_d_E
+
+        if abs(u_E)>12:
+            if u_E>0:
+                u_E = u_max
+            else:
+                u_E = -u_max
+
+        erro_D = wd_o - wd_pulso
+        erro_d_D = (erro_D - erro_old_D)/dt
+        erro_i_D = erro_i_D + erro_D*dt
+        erro_old_D = erro_D
+
+        u_D = Kp_D*erro_D + Ki_D*erro_i_D + Kd_D*erro_d_D
+        if abs(u_D)>12:
+            if u_D>0:
+                u_D = u_max
+            else:
+                u_D = -u_max   
+        
+        vrep.simxSetJointTargetVelocity(clientID,  leftMotorHandle, u_E, vrep.simx_opmode_streaming)
+        vrep.simxSetJointTargetVelocity(clientID, rightMotorHandle, u_D, vrep.simx_opmode_streaming)
+        
+        print("Pose Real        (x,y,phi): (%1.2f, %1.2f, %1.2f)" % (x_real, y_real, phi_real))
+        print("Pose Odometria   (x,y,phi): (%1.2f, %1.2f, %1.2f)" % (x_o, y_o, phi_o))
         #print("Pose do Alvo     (x,y,phi): (%1.2f, %1.2f, %1.2f)" % (xg, yg, phig))
-        print("Pulsos dos Encoders (E, D): (%d, %d)" % (pe,pd))
+        #print("Pulsos dos Encoders (E, D): (%d, %d)" % (pe,pd))
         #print("we, wd: (%d, %d)" % (wl,wr))
         
         vrep.simxSynchronousTrigger(clientID); # Trigger next simulation step (Blocking function call)
